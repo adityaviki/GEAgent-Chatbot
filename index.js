@@ -6,7 +6,7 @@ const sgMail = require('@sendgrid/mail');
 admin.initializeApp(functions.config().firebase);
 const db = admin.database();
 
-process.env.SENDGRID_API_KEY = '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';
+process.env.SENDGRID_API_KEY = '';
 
 exports.dialogflowFirebaseFulfillment = functions.https.onRequest((request, response) => {
 
