@@ -1,377 +1,629 @@
 'use strict';
-
 const functions = require('firebase-functions');
-const admin = require("firebase-admin");
-const {WebhookClient} = require('dialogflow-fulfillment');
-const {Card, Suggestion} = require('dialogflow-fulfillment');
-
-process.env.DEBUG = 'dialogflow:debug'; // enables lib debugging statements
+const admin = require('firebase-admin');
+const sgMail = require('@sendgrid/mail');
 
 admin.initializeApp(functions.config().firebase);
-
 const db = admin.database();
 
+process.env.SENDGRID_API_KEY = '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';
+
 exports.dialogflowFirebaseFulfillment = functions.https.onRequest((request, response) => {
-  const agent = new WebhookClient({ request, response });
-  console.log('Dialogflow Request headers: ' + JSON.stringify(request.headers));
-  console.log('Dialogflow Request body: ' + JSON.stringify(request.body));
 
-  function welcome(agent) {
-    agent.add(`Hi there! I am a chatbot for GE Appliance and I can help you book service appointments, reschedule or cancel your appointment. You can also get the details of your last appointment`);
-    agent.add(new Suggestion(`Book`));
-    agent.add(new Suggestion(`Reschedule`));
-    agent.add(new Suggestion(`Cancel`));
-    agent.add(new Suggestion(`Get details`));
-  }
- 
-  function fallback(agent) {
-    agent.add(`Sorry! I didn't get that`);
-    agent.add(new Suggestion(`Book Appointment`));
-    agent.add(new Suggestion(`Reschedule Appointment`));
-    agent.add(new Suggestion(`Cancel Appointment`));
-    agent.add(new Suggestion(`My Appointment`));
+  let parameters = request.body.queryResult.parameters;
+  let action = request.body.queryResult.action;
+  let sessionId = request.body.session;
+  let inputContexts = request.body.queryResult.outputContexts;
+  let fulfillmentMessages = [];
+  let outputContexts = [];
+
+  switch (action) {
+    case 'default.welcome.intent':
+      handleWelcomeIntent();
+      break;
+    case 'default.fallback.intent':
+      handleFallbackIntent();
+      break;
+    case 'book.appointment':
+      handleBookAppointment();
+      break;
+    case 'provide.model.number':
+      validateModelNumber();
+      break;
+    case 'provide.serial.number':
+      validateSerialNumber();
+      break;
+    case 'provide.user.name':
+      validateUserName();
+      break;
+    case 'provide.email':
+      validateEmail();
+      break;
+    case 'provide.phone.number':
+      validatePhoneNumber();
+      break;
+    case 'provide.pincode':
+      validatePincode();
+      break;
+    case 'provide.schedule.time':
+      validateScheduleTime();
+      break;
+    case 'provide.description':
+      handleDescription();
+      break;
+    case 'provide.booking.confirmation':
+      handleBookingConfirmation();
+      break;
+    case 'reschedule.appointment':
+      handleRescheduleAppointment();
+      break;
+    case 'provide.tracking.number':
+      validateTrackingNumber();
+      break;
+    case 'send.email':
+      handleSendEmail();
+      break;
+    case 'provide.reschedule.time':
+      validateRescheduleTime();
+      break;
+    case 'appointment.rescheduled':
+      handleAppointmentRescheduled();
+      break;
+    case 'cancel.appointment':
+      handleCancelAppointment();
+      break;
+    case 'confirm.cancelation':
+      handleConfirmCancelation();
+      break;
+    case 'appointment.details':
+      handleAppointmentDetails();
+      break;
+    case 'cancel.conversation':
+      handleCancelConversation();
+      break;
+    default:
+      console.log('Error: Action not matched');
+      sendResponse();
   }
   
-  function bookAppointment(agent) {
-    agent.add(`To book a service appointment you need to have the model number and the serial number of the appliance with you`);
-    agent.add(`Do you wish to proceed?`);
-    agent.setContext({name: 'cancel_conversation', lifespan: 1, parameters:{type: 'booking'}});
+  function handleWelcomeIntent() {
+    addTextMessage(`Hi there! I am a chatbot for GE Appliance and I can help you book service appointments, reschedule or cancel your appointment. You can also get the details of your last appointment`);
+    addQuickReplies(['Book', 'Reschedule', 'Cancel', 'Get Details']);
+    sendResponse();
   }
-  
-  function modelNumber(agent) {
-    let modelNumber = agent.parameters.modelNumber;
+
+  function handleFallbackIntent() {
+    addTextMessage(`Sorry! I didn't get that`);
+    addQuickReplies(['Book', 'Reschedule', 'Cancel', 'Get Details']);
+    sendResponse();
+  }
+
+  function handleBookAppointment() {
+    addTextMessage(`To book a service appointment you need to have the model number and the serial number of the appliance with you`);
+    addTextMessage(`Do you wish to proceed?`);
+    setContext({
+      name: `${sessionId}/contexts/cancel_conversation`,
+      lifespanCount: 1,
+      parameters: {
+        type: 'booking'
+      }
+    });
+    sendResponse();
+  }
+
+  function validateModelNumber() {
+    let modelNumber = parameters.modelNumber;
     modelNumber = modelNumber.toUpperCase();
-    return db.ref("boughtAppliances").orderByChild("Model Number").equalTo(modelNumber).once("value").then(snapshot => {
-      if(snapshot.exists()){
-        agent.add(`Enter the serial number of the appliance`);
-        agent.setContext({name: 'awaiting_serial_number', lifespan: 1, parameters: {modelNumber: modelNumber}});
+    db.ref("boughtAppliances").orderByChild("Model Number").equalTo(modelNumber).once("value").then(snapshot => {
+      if (snapshot.exists()) {
+        addTextMessage(`Enter the serial number of the appliance`);
+        setContext({
+          name: `${sessionId}/contexts/awaiting_serial_number`,
+          lifespanCount: 1,
+          parameters: {
+            modelNumber: modelNumber
+          }
+        });
+      } else {
+        addTextMessage(`Invalid model number. Please enter a valid model number`);
+        addQuickReplies(['Cancel']);
+        setContext({
+          name: `${sessionId}/contexts/awaiting_model_number`,
+          lifespanCount: 1
+        });
       }
-      else{
-        agent.add(`Invalid model number. Please enter a valid model number`);
-        agent.add(new Suggestion(`Cancel`));
-        agent.setContext({name: 'awaiting_model_number', lifespan: 1});
-      }
-    }).catch( err => {
-        console.log('Error', err);
+      sendResponse();
+    }).catch(err => {
+      console.log('Error', err);
     });
   }
 
-  function serialNumber(value) {
-    let serialNumber = agent.parameters.serialNumber;
-    let modelNumber = agent.getContext('awaiting_serial_number').parameters.modelNumber;
+  function validateSerialNumber() {
+    let serialNumber = parameters.serialNumber;
+    let modelNumber = getContext('cancel_conversation').parameters.modelNumber;
     serialNumber = serialNumber.toUpperCase();
-    return db.ref("boughtAppliances").orderByChild("Serial Number").equalTo(serialNumber).once("value").then(snapshot => {
-      if(snapshot.exists()){
-          let data;
-          snapshot.forEach(snap => {
-            data = snap.val();  
+    modelNumber = modelNumber.toUpperCase();
+    console.log(serialNumber);
+    console.log(modelNumber);
+    db.ref("boughtAppliances").orderByChild("Serial Number").equalTo(serialNumber).once("value").then(snapshot => {
+      if (snapshot.exists()) {
+        let data;
+        snapshot.forEach(snap => {
+          data = snap.val();
+        });
+        if (data["Model Number"] !== modelNumber) {
+          addTextMessage(`Serial number does not correspond to the provided model number.Please enter a valid serial number`);
+          addQuickReplies(['Cancel']);
+          setContext({
+            name: `${sessionId}/contexts/awaiting_serial_number`,
+            lifespanCount: 1
           });
-          if(data["Model Number"] != modelNumber) {
-            agent.add(`Serial number does not correspond to the provided model number.Please enter a valid serial number`);
-            agent.add(new Suggestion(`Cancel`));
-            agent.setContext({name: 'awaiting_serial_number', lifespan: 1});
-          }
-          else {
-            agent.add(`So you are booking the appointment for your ${data['Product Line']}. We can send a technician at your place to look into the issue.`);
-            agent.add(`Enter ok to continue`);
-            agent.setContext({name: 'confirm_appliance', lifespan: 1});
-            agent.setContext({name: 'cancel_conversation', lifespan: 1, parameters: {appliance: data['Product Line']}});
-          }
+        } else {
+          addTextMessage(`So you are booking the appointment for your ${data['Product Line']}?`);
+          addTextMessage(`Enter ok to continue`);
+          setContext({
+            name: `${sessionId}/contexts/confirm_appliance`,
+            lifespanCount: 1
+          });
+          setContext({
+            name: `${sessionId}/contexts/cancel_conversation`,
+            lifespanCount: 1,
+            parameters: {
+              appliance: data['Product Line']
+            }
+          });
+        }
+      } else {
+        addTextMessage(`Invalid serial number. Please enter a valid serial number`);
+        addQuickReplies(['Cancel']);
+        setContext({
+          name: `${sessionId}/contexts/awaiting_serial_number`,
+          lifespanCount: 1
+        });
       }
-      else{
-        agent.add(`Invalid serial number. Please enter a valid serial number`);
-        agent.add(new Suggestion(`Cancel`));
-        agent.setContext({name: 'awaiting_serial_number', lifespan: 1});
-      }
-    }).catch( err => {
-        console.log('Error', err);
+      sendResponse();
+    }).catch(err => {
+      console.log('Error', err);
     });
   }
 
-  function userName(agent) {
+  function validateUserName() {
     let regex = /^[a-zA-Z]+(([',. -][a-zA-Z ])?[a-zA-Z]*)*$/g;
-    let userName = agent.parameters.userName;
-    if(regex.test(userName)) {
-      agent.add(`Enter your email address`);
-      agent.setContext({ name: 'awaiting_email', lifespan: 1});
+    let userName = parameters.userName;
+    console.log(userName);
+    if (regex.test(userName)) {
+      addTextMessage(`Enter your email address`);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_email`,
+        lifespanCount: 1
+      });
     } else {
-      agent.add(`Name should only contain letters and spaces. Try again`);
-      agent.add(new Suggestion(`cancel`));
-      agent.setContext({name: 'awaiting_user_name', lifespan: 1});
+      addTextMessage(`Name should only contain letters and spaces. Try again`);
+      addQuickReplies(['Cancel']);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_user_name`,
+        lifespanCount: 1
+      });
     }
-  }
-  
-  function email(agent) {
-    let regex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/igm;
-    let email = agent.parameters.email;
-    if(regex.test(String(email).toLowerCase())) {
-      agent.add(`Enter you phone number`);
-      agent.setContext({ name: 'awaiting_phone_number', lifespan: 1});
-    } else {
-      agent.add(`Email address is not valid. Try again`);
-      agent.add(new Suggestion(`cancel`));
-      agent.setContext({name: 'awaiting_email', lifespan: 1});
-    }
-  }
-  
-  function phoneNumber(agent) {
-    let regex = /^[0-9]{10}$/;
-    let phoneNumber = agent.parameters.phoneNumber;
-    if(regex.test(phoneNumber)) {
-      agent.add(`Enter the address`);
-      agent.setContext({ name: 'awaiting_address', lifespan: 1});
-    } else {
-      agent.add(`Invalid phone number. Enter a 10 digit phone number with no special characters.`);
-      agent.add(new Suggestion(`cancel`));
-      agent.setContext({name: 'awaiting_phone_number', lifespan: 1});
-    }
-  }
-  
-  function pincode(agent) {
-    let regex = /^[1-9][0-9]{5}$/;
-    let pincode = agent.parameters.pincode;
-    if(regex.test(pincode)) {
-      let schedules = generateSchedules();
-      agent.setContext({ name: 'awaiting_schedule_time', lifespan: 1, parameters: schedules});
-    } else {
-      agent.add(`Invalid Pin Code. It should only contain 6 digits. Try again`);
-      agent.add(new Suggestion('cancel'));
-      agent.setContext({name: 'awaiting_pincode', lifespan: 1});
-    }
+    sendResponse();
   }
 
-  function scheduleTime(agent) {
-    let scheduleTime = agent.parameters.scheduleTime;
-    let schedules = agent.getContext('awaiting_schedule_time').parameters;
-    if((schedules.schedule1 === scheduleTime || schedules.schedule2 === scheduleTime || schedules.schedule3 === scheduleTime)) {
-      agent.add(`Write the description of the issue you are facing with the appliance`);
-      agent.setContext({ name: 'awaiting_description', lifespan: 1});
+  function validateEmail() {
+    let email = parameters.email;
+    let regex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/igm;
+    if (regex.test(String(email).toLowerCase())) {
+      addTextMessage(`Enter you phone number`);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_phone_number`,
+        lifespanCount: 1
+      });
     } else {
-      agent.add(`You can only choose one of the provided schedule`);
-      agent.add(new Suggestion(schedules.schedule1)); agent.add(new Suggestion(schedules.schedule2)); agent.add(new Suggestion(schedules.schedule3));
-      agent.add(new Suggestion(`Cancel`));
-      agent.setContext({name: 'awaiting_schedule_time', lifespan: 1});
+      addTextMessage(`Email address is not valid. Try again`);
+      addQuickReplies(['Cancel']);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_email`,
+        lifespanCount: 1
+      });
     }
+    sendResponse();
   }
-  
-  function rescheduleTime(agent) {
-    let scheduleTime = agent.parameters.scheduleTime;
-    let schedules = agent.getContext('awaiting_reschedule_time').parameters;
-    if((schedules.schedule1 === scheduleTime || schedules.schedule2 === scheduleTime || schedules.schedule3 === scheduleTime)) {
-      agent.add(`Your appointment will be changed to "${scheduleTime}". Do you confirm?`);
-      agent.add(new Suggestion(`Confirm`));
-      agent.add(new Suggestion(`Cancel`));
-      agent.setContext({name: 'change_schedule', lifespan: 1});
+
+  function validatePhoneNumber() {
+    let regex = /^[0-9]{10}$/;
+    let phoneNumber = parameters.phoneNumber;
+    if (regex.test(phoneNumber)) {
+      addTextMessage(`Enter the address`);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_address`,
+        lifespanCount: 1
+      });
     } else {
-      agent.add(`You can only choose one of the provided schedule`);
-      agent.add(new Suggestion(schedules.schedule1)); agent.add(new Suggestion(schedules.schedule2)); agent.add(new Suggestion(schedules.schedule3));
-      agent.add(new Suggestion(`cancel`));
-      agent.setContext({name: 'awaiting_reschedule_time', lifespan:1});
+      addTextMessage(`Invalid phone number. Enter a 10 digit phone number with no special characters.`);
+      addQuickReplies(['Cancel']);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_phone_number`,
+        lifespanCount: 1
+      });
     }
+    sendResponse();
   }
-  
+
+  function validatePincode() {
+    let regex = /^[1-9][0-9]{5}$/;
+    let pincode = parameters.pincode;
+    if (regex.test(pincode)) {
+      let schedules = generateSchedules();
+      setContext({
+        name: `${sessionId}/contexts/awaiting_schedule_time`,
+        lifespanCount: 1,
+        parameters: schedules
+      });
+    } else {
+      addTextMessage(`Invalid Pin Code. It should only contain 6 digits. Try again`);
+      addQuickReplies(['Cancel']);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_pincode`,
+        lifespanCount: 1
+      });
+    }
+    sendResponse();
+  }
+
+  function validateScheduleTime() {
+    let scheduleTime = parameters.scheduleTime;
+    let schedules = getContext('awaiting_schedule_time').parameters;
+    if ((schedules.schedule1 === scheduleTime || schedules.schedule2 === scheduleTime || schedules.schedule3 === scheduleTime)) {
+      addTextMessage(`Write the description of the issue you are facing with the appliance`);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_description`,
+        lifespanCount: 1
+      });
+    } else {
+      addTextMessage(`You can only choose one of the provided schedule`);
+      addQuickReplies([schedules.schedule1, schedules.schedule2, schedules.schedule3, 'Cancel']);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_schedule_time`,
+        lifespanCount: 1
+      });
+    }
+    sendResponse();
+  }
+
+  function validateRescheduleTime() {
+    let scheduleTime = parameters.scheduleTime;
+    let schedules = getContext('awaiting_reschedule_time').parameters;
+    if ((schedules.schedule1 === scheduleTime || schedules.schedule2 === scheduleTime || schedules.schedule3 === scheduleTime)) {
+      addTextMessage(`Your appointment will be changed to ${scheduleTime}. Do you confirm?`);
+      addQuickReplies(['Confirm', 'Cancel']);
+      setContext({
+        name: `${sessionId}/contexts/change_schedule`,
+        lifespanCount: 1
+      });
+    } else {
+      addTextMessage(`You can only choose one of the provided schedule`);
+      addQuickReplies([schedules.schedule1, schedules.schedule2, schedules.schedule3, 'Cancel']);
+      setContext({
+        name: `${sessionId}/contexts/awaiting_reschedule_time`,
+        lifespanCount: 1
+      });
+    }
+    sendResponse();
+  }
+
   function generateSchedules() {
     let schedules = {};
     let schedule1 = generateScheduleTime();
     let schedule2 = generateScheduleTime();
     let schedule3 = generateScheduleTime();
-    agent.add(`Choose one of the time slots available for the service appointment`);
-    agent.add(new Suggestion(schedule1)); agent.add(new Suggestion(schedule2)); agent.add(new Suggestion(schedule3));
-    schedules.schedule1 = schedule1; schedules.schedule2 = schedule2; schedules.schedule3 = schedule3;      
+    addTextMessage(`Choose one of the time slots available for the service appointment`);
+    addQuickReplies([schedule1, schedule2, schedule3]);
+    schedules.schedule1 = schedule1;
+    schedules.schedule2 = schedule2;
+    schedules.schedule3 = schedule3;
     return schedules;
   }
-  
+
   function generateScheduleTime() {
     let date = 1 + Math.floor(Math.random() * 30);
-    let day = ['Monday', 'Tuesday', 'Wednesday', 'Thrusday', 'Friday', 'Saturday', 'Sunday'];
-    let time = ['10 AM', '11 AM', '12 PM', '1 PM', '2 PM', '3 PM', '4 PM', '5 PM', '6 PM', '7 PM'];
+    let day = ['Mon', 'Tue', 'Wed', 'Thru', 'Fri', 'Sat', 'Sun'];
+    let time = ['10AM', '11AM', '12PM', '1PM', '2PM', '3PM', '4PM', '5PM', '6PM', '7PM'];
     let a = Math.floor(Math.random() * 7);
-    let schedule = day[a] + " " + date + " " + time[a] + " - " + time[a+3];
+    let schedule = day[a] + " " + date + " " + time[a] + " - " + time[a + 3];
     return schedule;
   }
 
-  function provideDescription(agent) {
-    agent.add(`Great! We have all the information that we need`);
-    let parameters = agent.getContext('cancel_conversation').parameters;
-    agent.add( `Name:    ${parameters.userName}\nEmail:    ${parameters.email}\nPhone Number:    ${parameters.phoneNumber}\nAddress:    ${parameters.address}\nPin Code:    ${parameters.pincode}\nAppliance:    ${parameters.appliance}\nModel Number:    ${parameters.modelNumber}\nSerial Number:    ${parameters.serialNumber}\nAppointment Schedule:    ${parameters.scheduleTime}\nIssue Description:    ${parameters.description}`);
-    agent.add(new Suggestion(`Confirm Booking`));
-    agent.add(new Suggestion(`Cancel Booking`));
-    agent.setContext({name: 'awaiting_booking_confirmation', lifespan: 1});
-  } 
+  function handleDescription() {
+    addTextMessage(`Great! We have all the information that we need`);
+    let parameters = getContext('cancel_conversation').parameters;
+    addTextMessage(`Name:  ${parameters.userName}\nEmail:  ${parameters.email}\nPhone Number:  ${parameters.phoneNumber}\nAddress:  ${parameters.address}\nPin Code:  ${parameters.pincode}\nAppliance:  ${parameters.appliance}\nModel Number:  ${parameters.modelNumber}\nSerial Number:  ${parameters.serialNumber}\nAppointment Schedule:  ${parameters.scheduleTime}\nIssue Description:  ${parameters.description}`);
+    addQuickReplies(['Confirm booking', 'Cancel booking']);
+    setContext({
+      name: `${sessionId}/contexts/awaiting_booking_confirmation`,
+      lifespanCount: 1
+    });
+    sendResponse();
+  }
 
-  function provideBookingConfirmation(agent) {
-    let parameters = agent.getContext('cancel_conversation').parameters;
+  function handleBookingConfirmation() {
+    let parameters = getContext('cancel_conversation').parameters;
     let trackingNumber = Math.random().toString(36).substr(2, 7);
     trackingNumber = trackingNumber.toUpperCase();
     parameters.trackingNumber = trackingNumber;
     let userInfo = {
-      uniqueTrackingNumber: trackingNumber,
+      trackingNumber: trackingNumber,
       userName: parameters.userName,
       email: parameters.email,
       phoneNumber: parameters.phoneNumber,
       address: parameters.address,
       pincode: parameters.pincode,
       appliance: parameters.appliance,
-      modelNumber: parameters.modelNumber,
-      serialNumber: parameters.serialNumber,
-      appointmentSchedule: parameters.scheduleTime,
+      modelNumber: parameters.modelNumber.toUpperCase(),
+      serialNumber: parameters.serialNumber.toUpperCase(),
+      scheduleTime: parameters.scheduleTime,
       issueDescription: parameters.description
     };
-    return db.ref("Appointments").child(trackingNumber).set(userInfo)
-    .then(() =>{
-      agent.add(`Appointment successfully booked. We will get back to you soon`);
-      agent.add(`${trackingNumber} is your unique tracking number`);
-      agent.add(`You can use it to check the details of your appointment. It can also be used to reschedule or cancel your appointment`);
-    })
-    .catch(error =>{
-      console.error("Error writing user details: ", error);
-    });
-  }
-  
-  function rescheduleAppointment(agent) {
-    agent.add(`To reschedule your service appointment. You need to have the tracking number with you that was provided at the time of appointment booking`);
-    agent.add(`Do you wish to proceed?`);
-    agent.setContext({name: 'cancel_conversation', lifespan: 1, parameters: {type: 'reschedule'}});
-  }
-  
-  function appointmentRescheduled(agent) {
-    let params = agent.getContext('cancel_conversation').parameters;
-    let trackingNumber = params.trackingNumber;
-    let rescheduleTime = params.scheduleTime;
-    trackingNumber = trackingNumber.toUpperCase();
-    return db.ref("Appointments").orderByChild("uniqueTrackingNumber").equalTo(trackingNumber).once("value").then(snapshot => {
-      let parameters;
-      snapshot.forEach(snap =>{
-        parameters = snap.val();
+    db.ref(`Appointments/${trackingNumber}`).set(userInfo)
+      .then(() => {
+        sendEmail(userInfo);
+        addTextMessage(`Appointment successfully booked. Your appointment details are sent to your email address`);
+        addTextMessage(`${trackingNumber} is your unique tracking number. You can use it to check the details of your appointment. It can also be used to reschedule or cancel your appointment`);
+        sendResponse();
+      })
+      .catch(error => {
+        console.error("Error writing user details: ", error);
       });
-      return db.ref("Appointments").child(trackingNumber).update({scheduleTime: rescheduleTime}).then(()=>{
-        agent.add(`Your appointment has been rescheduled`);
-        agent.add(`Here's the details of your appointment`);
-        agent.add( `Name:    ${parameters.userName}\nEmail:    ${parameters.email}\nPhone Number:    ${parameters.phoneNumber}\nAddress:    ${parameters.address}\nPin Code:    ${parameters.pincode}\nAppliance:    ${parameters.appliance}\nModel Number:    ${parameters.modelNumber}\nSerial Number:    ${parameters.serialNumber}\nAppointment Schedule:    ${parameters.appointmentSchedule}\nIssue Description:    ${parameters.issueDescription}`);
-      });
-    }).catch( err => {
-        console.log('Error', err);
-    });
-  }
-  
-  function validateTrackingNumber(agent) {
-    let trackingNumber = agent.parameters.trackingNumber;
-    let type = agent.getContext('cancel_conversation').parameters.type;
-    trackingNumber = trackingNumber.toUpperCase();
-    return db.ref("Appointments").orderByChild("uniqueTrackingNumber").equalTo(trackingNumber).once("value").then(snapshot => {
-      if(snapshot.exists()){
-        switch (type) {
-          case 'reschedule': {
-            let schedules = generateSchedules();
-            agent.setContext({ name: 'awaiting_reschedule_time', lifespan: 1, parameters: schedules});
-            break;
-            }
-          case 'cancel':
-            agent.add(`Are you Sure you want to cancel your appointment?`);
-            agent.add(new Suggestion(`Confirm`));
-            agent.add(new Suggestion(`Cancel`));
-            agent.setContext({name: 'confirm_cancelation', lifespan: 1});
-            break;
-          case 'details':
-            agent.add(`Here is all the details of your appointment`);
-            let parameters;
-            snapshot.forEach(snap =>{
-            parameters = snap.val();
-            });
-            agent.add( `Name:    ${parameters.userName}\nEmail:    ${parameters.email}\nPhone Number:    ${parameters.phoneNumber}\nAddress:    ${parameters.address}\nPin Code:    ${parameters.pincode}\nAppliance:    ${parameters.appliance}\nModel Number:    ${parameters.modelNumber}\nSerial Number:    ${parameters.serialNumber}\nAppointment Schedule:    ${parameters.appointmentSchedule}\nIssue Description:    ${parameters.issueDescription}`);
-          }
-      }
-      else {
-        switch (type) {
-          case 'reschedule':
-            agent.setContext({name: 'res_awaiting_tracking_number', lifespan: 1}); 
-            break;
-          case 'cancel':
-            agent.setContext({name: 'awaiting_tracking_no_cancel', lifespan: 1});
-            break;
-          case 'details':
-           agent.setContext({name: 'get_appointment_details', lifespan: 1});
-        }
-        agent.add(`Invalid tracking number. Please enter a valid tracking number`);
-        agent.add(new Suggestion(`Cancel`));
-      }
-      
-    }).catch( err => {
-        console.log('Error', err);
-    });
-  }
-  
-  function cancelAppointment(agent) {
-    agent.add('To cancel your appointment you need to have the unique tracking number that was provided to you at the time of booking');
-    agent.add('Do you wish to proceed?');
-    agent.setContext({name: 'cancel_conversation', lifespan: 1, parameters: {type: 'cancel'}});
-  }
-  
-  function confirmCancelation(agent) {
-      let trackingNumber = agent.getContext('cancel_conversation').parameters.trackingNumber;
-      trackingNumber = trackingNumber.toUpperCase();
-      console.log(trackingNumber);
-      return db.ref("Appointments").child(trackingNumber).remove().then(()=>{
-      agent.add(`Your appointment has been successfully canceled`);
-      }).catch((err)=>{
-      console.log("Error", err);
-      });
-  }
-  
-  function appointmentDetails(agent) {
-    agent.add('To know the details of your appointment enter the tracking number that was provided at the time of booking');
-    agent.setContext({name: 'cancel_conversation', lifespan: 1, parameters: {type: 'details'}});
-  }
-  
-  function cancelConversation(agent) {
-    agent.add(`Canceled`);
-    let type = agent.getContext('cancel_conversation').parameters.type;
-    switch (type) {
-      case 'booking':
-        agent.add(`Your appointment is not booked`);
-        break;
-      case 'reschedule':
-        agent.add(`Your appointment has not been rescheduled`);
-        break;
-      case 'cancel':
-        agent.add(`Your appointment is still active`);
-    }
-    agent.add(`What would you like to do next?`);
-    agent.add(new Suggestion(`Book`));
-    agent.add(new Suggestion(`Reschedule`));
-    agent.add(new Suggestion(`Cancel`));
-    agent.add(new Suggestion(`Get Details`));
   }
 
-  let intentMap = new Map();
-  
-  intentMap.set('Default Welcome Intent', welcome);
-  intentMap.set('Default Fallback Intent', fallback);
-  
-  intentMap.set('book appointment', bookAppointment);
-  intentMap.set('provide model number', modelNumber);
-  intentMap.set('provide serial number', serialNumber);
-  intentMap.set('provide user name', userName);
-  intentMap.set('provide email', email);
-  intentMap.set('provide phone number', phoneNumber);
-  intentMap.set('provide pincode', pincode);
-  intentMap.set('provide schedule time', scheduleTime);
-  intentMap.set('provide description', provideDescription);
-  intentMap.set('provide booking confirmation', provideBookingConfirmation);
-  
-  intentMap.set('reschedule appointment', rescheduleAppointment);
-  intentMap.set('rescheduling tracking no',validateTrackingNumber);
-  intentMap.set('provide reschedule time', rescheduleTime);
-  intentMap.set('appointment rescheduled', appointmentRescheduled);
-  
-  intentMap.set('cancel appointment', cancelAppointment);
-  intentMap.set('provide cancelation tracking no', validateTrackingNumber);
-  intentMap.set('confirm cancelation', confirmCancelation);
-  
-  intentMap.set('appointment details', appointmentDetails);
-  intentMap.set('get appointment details', validateTrackingNumber);
-  
-  intentMap.set('cancel conversation', cancelConversation);
-  
-  agent.handleRequest(intentMap);
+  function sendEmail(userInfo) {
+    sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+    const msg = {
+      to: userInfo.email,
+      from: 'adityaviki01@gmail.com',
+      subject: 'Your Service Appointment Details - GE Appliances',
+      html: `<h2>Greetings from GE appliances. Here are the details of your appointment</h2><br>
+        <h3>Tracking Number: ${userInfo.trackingNumber}</h3><br>
+        Name:  ${userInfo.userName}<br>
+        Email:  ${userInfo.email}<br>
+        Phone Number:  ${userInfo.phoneNumber}<br>
+        Address:  ${userInfo.address}<br>
+        Pin Code:  ${userInfo.pincode}<br>
+        Appliance:  ${userInfo.appliance}<br>
+        Model Number:  ${userInfo.modelNumber}<br>
+        Serial Number:  ${userInfo.serialNumber}<br>
+        Appointment Schedule:  ${userInfo.scheduleTime}<br>
+        Issue Description:  ${userInfo.issueDescription}`
+    };
+    sgMail.send(msg);
+  }
+
+  function handleRescheduleAppointment() {
+    addTextMessage(`To reschedule your appointment, You can choose to enter the tracking number or your email address`);
+    addQuickReplies(['Enter tracking No', 'Enter email', 'Cancel']);
+    setContext({
+      name: `${sessionId}/contexts/cancel_conversation`,
+      lifespanCount: 1,
+      parameters: {
+        type: 'reschedule'
+      }
+    });
+    sendResponse();
+  }
+
+  function handleAppointmentRescheduled() {
+    let parameters = getContext('cancel_conversation').parameters;
+    let trackingNumber = parameters.trackingNumber;
+    let rescheduleTime = parameters.scheduleTime;
+    trackingNumber = trackingNumber.toUpperCase();
+    db.ref(`Appointments/${trackingNumber}`).once('value').then(snapshot => {
+      let parameters = snapshot.val();
+      snapshot.ref.update({
+        scheduleTime: rescheduleTime
+      });
+      addTextMessage(`Your appointment has been rescheduled`);
+      addTextMessage(`Here's the details of your appointment`);
+      addTextMessage(`Name:  ${parameters.userName}\nEmail:  ${parameters.email}\nPhone Number:  ${parameters.phoneNumber}\nAddress:  ${parameters.address}\nPin Code:  ${parameters.pincode}\nAppliance:  ${parameters.appliance}\nModel Number:  ${parameters.modelNumber}\nSerial Number:  ${parameters.serialNumber}\nAppointment Schedule:  ${parameters.scheduleTime}\nIssue Description:  ${parameters.issueDescription}`);
+      sendResponse();
+    }).catch((err) => {
+      console.log('Error', err);
+    });
+  }
+
+  function validateTrackingNumber() {
+    let trackingNumber = parameters.trackingNumber;
+    let type = getContext('cancel_conversation').parameters.type;
+    trackingNumber = trackingNumber.toUpperCase();
+    db.ref(`Appointments/${trackingNumber}`).once("value").then(snapshot => {
+      if (snapshot.exists()) {
+        switch (type) {
+          case 'reschedule':
+            {
+              let schedules = generateSchedules();
+              setContext({
+                name: `${sessionId}/contexts/awaiting_reschedule_time`,
+                lifespanCount: 1,
+                parameters: schedules
+              });
+              setContext({
+                name: `${sessionId}/contexts/cancel_conversation`,
+                lifespanCount: 1,
+              });
+              break;
+            }
+          case 'cancel':
+            addTextMessage(`Are you Sure you want to cancel your appointment?`);
+            addQuickReplies(['Confirm', 'Cancel']);
+            setContext({
+              name: `${sessionId}/contexts/confirm_cancelation`,
+              lifespanCount: 1
+            });
+            setContext({
+                name: `${sessionId}/contexts/cancel_conversation`,
+                lifespanCount: 1,
+              });
+            break;
+          case 'details':
+            {
+              addTextMessage(`Here is all the details of your appointment`);
+              let parameters = snapshot.val();
+              addTextMessage(`Name:  ${parameters.userName}\nEmail:  ${parameters.email}\nPhone Number:  ${parameters.phoneNumber}\nAddress:  ${parameters.address}\nPin Code:  ${parameters.pincode}\nAppliance:  ${parameters.appliance}\nModel Number:  ${parameters.modelNumber}\nSerial Number:  ${parameters.serialNumber}\nAppointment Schedule:  ${parameters.scheduleTime}\nIssue Description:  ${parameters.issueDescription}`);
+            }
+        }
+      } else {
+        addTextMessage(`Invalid tracking number. If you have lost your tracking number your can enter you email and we can send you the tracking number at your email address`);
+        addQuickReplies(['Enter tracking number', 'Enter Email', 'Cancel']);
+        setContext({
+          name: `${sessionId}/contexts/enter_tracking_number`,
+          lifespanCount: 1
+        });
+        setContext({
+          name: `${sessionId}/contexts/enter_email`,
+          lifespanCount: 1
+        });
+        setContext({
+          name: `${sessionId}/contexts/cancel_conversation`,
+          lifespanCount: 1  
+        });
+      }
+      sendResponse();
+    }).catch(err => {
+      console.log('Error', err);
+    });
+  }
+
+  function handleSendEmail() {
+    let email = parameters.email;
+    let regex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/igm;
+    if (regex.test(String(email).toLowerCase())) {
+      db.ref('Appointments').orderByChild('email').equalTo(email).once("value").then(snapshot => {
+        if (snapshot.exists()) {
+          let count = 0;
+          snapshot.forEach(snap => {
+            count += 1;
+            sendEmail(snap.val());
+          });
+          if(count == 1)
+            addTextMessage(`Your appointment details and tracking number are sent to your email`);
+          else
+            addTextMessage(`You seem to have multiple appointments associalted with this email. All your appointments and their respective tracking number are sent to your email`);
+        } else {
+          addTextMessage(`No appointment associated with this email. Enter a valid email`);
+          addQuickReplies(['Cancel']);
+          setContext({
+            name: `${sessionId}/contexts/send_email`,
+            lifespanCount: 1
+          });
+        }
+        sendResponse();
+      }).catch((err) => {
+        console.log('Error', err);
+      });
+    } else {
+      addTextMessage(`Email address not valid. Enter a valid email`);
+      addQuickReplies(['Cancel']);
+      setContext({
+        name: `${sessionId}/contexts/send_email`,
+        lifespanCount: 1
+      });
+      sendResponse();
+    }
+  }
+
+  function handleCancelAppointment() {
+    addTextMessage('To cancel your appointment you can choose to enter the tracking number or your email address');
+    addQuickReplies(['Enter tracking no', 'Enter email', 'cancel']);
+    setContext({
+      name: `${sessionId}/contexts/enter_tracking_number`,
+      lifespanCount: 1,
+    });
+    setContext({
+      name: `${sessionId}/contexts/cancel_conversation`,
+      lifespanCount: 1,
+      parameters: {
+        type: 'cancel'
+      }
+    });
+    setContext({
+      name: `${sessionId}/contexts/enter_email`,
+      lifespanCount: 1,
+    });
+    sendResponse();
+  }
+
+  function handleConfirmCancelation() {
+    let trackingNumber = getContext('cancel_conversation').parameters.trackingNumber;
+    trackingNumber = trackingNumber.toUpperCase();
+    db.ref(`Appointments/${trackingNumber}`).remove().then(() => {
+      addTextMessage(`Your appointment has been successfully canceled`);
+      sendResponse();
+    }).catch((err) => {
+      console.log("Error", err);
+    });
+  }
+
+  function handleAppointmentDetails() {
+    addTextMessage('To know your appointment details you can choose to enter the tracking number or your email address');
+    addQuickReplies(['Enter tracking no', 'Enter email', 'cancel']);
+    setContext({
+      name: `${sessionId}/contexts/cancel_conversation`,
+      lifespanCount: 1,
+      parameters: {
+        type: 'details'
+      }
+    });
+    sendResponse();
+  }
+
+  function handleCancelConversation() {
+    addTextMessage(`Canceled`);
+    let type = getContext('cancel_conversation').parameters.type;
+    switch (type) {
+      case 'booking':
+        addTextMessage(`Your appointment is not booked`);
+        break;
+      case 'reschedule':
+        addTextMessage(`Your appointment has not been rescheduled`);
+        break;
+      case 'cancel':
+        addTextMessage(`Your appointment is still active`);
+    }
+    addTextMessage(`What would you like to do next?`);
+    addQuickReplies(['Book', 'Reschedule', 'Cancel Appointment', 'Get Details']);
+    sendResponse();
+  }
+
+  function getContext(contextName) {
+    let context = {};
+    inputContexts.forEach((snap) => {
+      if (snap.name === `${sessionId}/contexts/${contextName}`)
+        context = snap;
+    });
+    return context;
+  }
+
+  function addTextMessage(textMessage) {
+    fulfillmentMessages.push({
+      "text": {
+        "text": [textMessage]
+      }
+    });
+  }
+
+  function addQuickReplies(replies) {
+    fulfillmentMessages.push({
+      "quickReplies": {
+        "quickReplies": replies
+      }
+    });
+  }
+
+  function setContext(context) {
+    outputContexts.push(context);
+  }
+
+  function sendResponse() {
+    response.send({
+      'fulfillmentMessages': fulfillmentMessages,
+      'outputContexts': outputContexts
+    });
+  }
 });
